@@ -1,5 +1,5 @@
 FROM node:20-alpine AS base
-RUN apk add --no-cache openssl
+RUN apk add --no-cache openssl openssl-dev libc6-compat
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -7,16 +7,15 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
 RUN npm ci
+# Generate Prisma Client in deps stage (dummy URL - no DB connection needed)
+ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
+RUN npx prisma generate
 
 # Rebuild the source code only when needed
 FROM base AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-
-# Generate Prisma Client (dummy URL for build stage - no DB connection needed)
-ENV DATABASE_URL="postgresql://dummy:dummy@localhost:5432/dummy"
-RUN npx prisma generate --schema=./prisma/schema.prisma
 
 # Build Next.js
 RUN npm run build
