@@ -173,7 +173,7 @@ function DocumentCreateContent() {
           const filledPdfBytes = await pdfDoc.save();
           pdfs.push({
             name: `${template.name}.pdf`,
-            blob: new Blob([filledPdfBytes], { type: "application/pdf" }),
+            blob: new Blob([filledPdfBytes as BlobPart], { type: "application/pdf" }),
           });
         } catch (err) {
           console.error(`Error generating PDF for ${template.name}:`, err);
