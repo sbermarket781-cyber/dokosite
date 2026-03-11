@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: alexeidocs
+      POSTGRES_PASSWORD: alexeidocs
+      POSTGRES_DB: alexeidocs
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  app:
+    build: .
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: "postgresql://alexeidocs:alexeidocs@db:5432/alexeidocs?schema=public"
+      NEXTAUTH_SECRET: "change-this-to-a-secure-random-string"
+      NEXTAUTH_URL: "http://localhost:3000"
+    depends_on:
+      - db
+    volumes:
+      - uploads:/app/uploads
+
+volumes:
+  pgdata:
+  uploads:
