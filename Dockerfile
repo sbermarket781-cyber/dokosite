@@ -34,11 +34,8 @@ COPY --from=builder /app/.next/standalone ./
 RUN rm -f prisma.config.ts
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-
-# Install prisma CLI for migrations (with all its dependencies)
-RUN npm install --no-save prisma@$(node -e "console.log(require('./node_modules/@prisma/client/package.json').version)")
+# Copy all node_modules from deps (prisma CLI has many transitive deps)
+COPY --from=deps /app/node_modules ./node_modules
 
 # Create uploads directory
 RUN mkdir -p uploads/templates uploads/generated && chown -R nextjs:nodejs uploads
