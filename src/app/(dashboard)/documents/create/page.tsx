@@ -119,65 +119,29 @@ function DocumentCreateContent() {
 
       if (!response.ok) throw new Error("Failed to save");
 
-      // Generate PDFs in browser
+      // Generate PDFs via server-side API
       const pdfs: { name: string; blob: Blob }[] = [];
 
       for (const template of selectedTemplates) {
         try {
-          // Fetch template PDF
-          const pdfResponse = await fetch(template.filePath);
-          const pdfBytes = await pdfResponse.arrayBuffer();
+          const genResponse = await fetch("/api/documents/generate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              filePath: template.filePath,
+              fieldValues,
+            }),
+          });
 
-          // Use pdf-lib to fill placeholders
-          const { PDFDocument } = await import("pdf-lib");
-          const pdfDoc = await PDFDocument.load(pdfBytes);
-          const pages = pdfDoc.getPages();
+          if (!genResponse.ok) throw new Error("Generation failed");
 
-          // Simple text replacement approach
-          // For production, use @pdfme/generator with proper coordinate mapping
-          const form = pdfDoc.getForm();
-
-          // Try to fill form fields first
-          try {
-            const fields = form.getFields();
-            fields.forEach((field) => {
-              const name = field.getName();
-              const value = fieldValues[name] || fieldValues[`{{${name}}}`];
-              if (value && "setText" in field) {
-                (field as { setText: (v: string) => void }).setText(
-                  String(value)
-                );
-              }
-            });
-          } catch {
-            // No form fields, use text overlay approach
-          }
-
-          // Flatten form
-          try {
-            form.flatten();
-          } catch {
-            // ignore
-          }
-
-          // For templates with {{...}} placeholders in visible text,
-          // we'll add text annotations
-          for (const page of pages) {
-            const { width, height } = page.getSize();
-            // This is a simplified approach — in production you'd use
-            // pdfme's coordinate-based text placement
-            void width;
-            void height;
-          }
-
-          const filledPdfBytes = await pdfDoc.save();
+          const blob = await genResponse.blob();
           pdfs.push({
             name: `${template.name}.pdf`,
-            blob: new Blob([filledPdfBytes as BlobPart], { type: "application/pdf" }),
+            blob,
           });
         } catch (err) {
           console.error(`Error generating PDF for ${template.name}:`, err);
-          // Still add a placeholder
           pdfs.push({
             name: `${template.name}.pdf`,
             blob: new Blob(["Error generating PDF"], { type: "text/plain" }),
