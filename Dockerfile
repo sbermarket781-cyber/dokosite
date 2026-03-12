@@ -36,7 +36,9 @@ COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+
+# Install prisma CLI for migrations (with all its dependencies)
+RUN npm install --no-save prisma@$(node -e "console.log(require('./node_modules/@prisma/client/package.json').version)")
 
 # Create uploads directory
 RUN mkdir -p uploads/templates uploads/generated && chown -R nextjs:nodejs uploads
@@ -47,4 +49,4 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-CMD ["sh", "-c", "node node_modules/prisma/build/index.js migrate deploy --schema prisma/schema.prisma && node server.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy --schema prisma/schema.prisma && node server.js"]
