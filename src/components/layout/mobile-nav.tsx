@@ -8,6 +8,7 @@ import {
   FilePlus,
   FolderOpen,
   Users,
+  FileStack,
   BarChart3,
 } from "lucide-react";
 import { motion } from "framer-motion";
@@ -27,6 +28,7 @@ const adminTabs = [
   { href: "/documents/create", label: "Создать", icon: FilePlus },
   { href: "/cabinet", label: "Документы", icon: FolderOpen },
   { href: "/admin/users", label: "Админ", icon: Users },
+  { href: "/admin/templates/upload", label: "Шаблоны", icon: FileStack },
   { href: "/admin/stats", label: "Стат.", icon: BarChart3 },
 ];
 
