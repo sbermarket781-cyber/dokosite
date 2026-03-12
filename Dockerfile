@@ -31,7 +31,7 @@ RUN adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
-RUN rm -f prisma.config.ts
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/prisma ./prisma
 # Copy all node_modules from deps (prisma CLI has many transitive deps)
@@ -46,4 +46,4 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-CMD ["sh", "-c", "npx prisma migrate deploy --schema prisma/schema.prisma && node server.js"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
