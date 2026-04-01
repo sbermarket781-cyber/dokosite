@@ -18,7 +18,6 @@ import json
 import fitz  # PyMuPDF
 import os
 import re
-import unicodedata
 
 # Preferred fonts for Cyrillic support (in order of preference)
 # Includes paths for both Debian/Ubuntu and Alpine Linux
@@ -66,14 +65,13 @@ def get_all_spans(page):
     blocks = page.get_text("dict")["blocks"]
     for block in blocks:
         for line in block.get("lines", []):
-            line_spans = line.get("spans", [])
-            for span in line_spans:
+            for span in line.get("spans", []):
                 spans.append(span)
     return spans
 
 
 def get_line_spans(page):
-    """Group spans by line, returning list of (line_spans, line_rect) tuples."""
+    """Group spans by line."""
     lines = []
     blocks = page.get_text("dict")["blocks"]
     for block in blocks:
@@ -86,9 +84,8 @@ def get_line_spans(page):
 
 def find_placeholder_in_line(line_spans, placeholder):
     """
-    Find a placeholder in concatenated line text.
-    Returns list of (rect, fontsize, color, is_bold) tuples.
-    Also handles normalized bracket matching.
+    Find a placeholder in concatenated line text (case-insensitive).
+    Returns list of (rect, fontsize, color, is_bold, origin_y) tuples.
     """
     results = []
 
@@ -100,18 +97,17 @@ def find_placeholder_in_line(line_spans, placeholder):
             char_map.append((si, span))
             line_text += ch
 
-    # Try exact match first, then normalized match
-    search_texts = [
-        (line_text, placeholder),
-        (normalize_brackets(line_text), normalize_brackets(placeholder)),
+    # Try case-insensitive match, also with normalized brackets
+    search_pairs = [
+        (line_text.lower(), placeholder.lower()),
+        (normalize_brackets(line_text).lower(), normalize_brackets(placeholder).lower()),
     ]
 
-    for text_to_search, pattern in search_texts:
+    for text_to_search, pattern in search_pairs:
         idx = text_to_search.find(pattern)
         while idx != -1:
             end_idx = idx + len(pattern)
 
-            # Calculate bounding rect from the character map
             involved_spans = set()
             x0, y0, x1, y1 = None, None, None, None
 
@@ -129,7 +125,6 @@ def find_placeholder_in_line(line_spans, placeholder):
                         y1 = max(y1, bbox[3])
 
             if x0 is not None:
-                # Get text properties from the first span containing the placeholder
                 first_span = char_map[idx][1]
                 fontsize = first_span.get("size", 11.0)
                 c = first_span.get("color", 0)
@@ -140,13 +135,14 @@ def find_placeholder_in_line(line_spans, placeholder):
                 )
                 flags = first_span.get("flags", 0)
                 is_bold = bool(flags & (1 << 4))
+                origin_y = first_span.get("origin", (0, y1))[1] if "origin" in first_span else None
 
-                results.append((fitz.Rect(x0, y0, x1, y1), fontsize, color, is_bold))
+                results.append((fitz.Rect(x0, y0, x1, y1), fontsize, color, is_bold, origin_y))
 
             idx = text_to_search.find(pattern, idx + 1)
 
         if results:
-            break  # Found with this search method, no need to try normalized
+            break
 
     return results
 
@@ -155,6 +151,7 @@ def replace_placeholders(input_path, output_path, replacements):
     """
     Open a PDF, find all {{...}} placeholders, remove them via redaction,
     and insert replacement text with a Cyrillic-capable font.
+    Matching is CASE-INSENSITIVE to handle {{Дата}} vs {{дата}}.
     """
     font_path = find_font(FONT_CANDIDATES)
     font_bold_path = find_font(FONT_BOLD_CANDIDATES)
@@ -176,7 +173,6 @@ def replace_placeholders(input_path, output_path, replacements):
         found = re.findall(r"\{\{[^}]+\}\}", normalized)
         all_pdf_placeholders.update(found)
 
-        # Also log all spans for debugging
         for span_data in get_all_spans(page):
             t = span_data.get("text", "").strip()
             if t and ("{" in t or "}" in t or "{" in normalize_brackets(t)):
@@ -189,11 +185,8 @@ def replace_placeholders(input_path, output_path, replacements):
 
     for page_num in range(len(doc)):
         page = doc[page_num]
-
-        # Get all line spans for this page
         lines = get_line_spans(page)
 
-        # Collect all redaction tasks
         redaction_tasks = []
 
         for placeholder, value in replacements.items():
@@ -203,46 +196,60 @@ def replace_placeholders(input_path, output_path, replacements):
             value = str(value)
             found_on_page = False
 
-            # Strategy 1: Direct search_for (fastest)
-            rects = page.search_for(placeholder)
-            if rects:
-                for rect in rects:
-                    fontsize, color, is_bold = 11.0, (0, 0, 0), False
-                    # Get properties from spans
-                    for line_spans in lines:
-                        for span in line_spans:
-                            if placeholder in span.get("text", ""):
-                                fontsize = span["size"]
-                                c = span.get("color", 0)
-                                color = (
-                                    ((c >> 16) & 0xFF) / 255.0,
-                                    ((c >> 8) & 0xFF) / 255.0,
-                                    (c & 0xFF) / 255.0,
-                                )
-                                flags = span.get("flags", 0)
-                                is_bold = bool(flags & (1 << 4))
-                                break
+            # Strategy 1: Direct search_for — try exact, then case variants
+            search_variants = [placeholder]
+            # Add case variants: original, Title Case, UPPER, lower
+            pl_inner = placeholder[2:-2] if placeholder.startswith("{{") else placeholder
+            for variant in [pl_inner, pl_inner.capitalize(), pl_inner.upper(), pl_inner.lower(), pl_inner.title()]:
+                v = f"{{{{{variant}}}}}"
+                if v not in search_variants:
+                    search_variants.append(v)
 
-                    redaction_tasks.append({
-                        "rect": rect,
-                        "value": value,
-                        "fontsize": fontsize,
-                        "color": color,
-                        "is_bold": is_bold,
-                    })
-                    found_on_page = True
+            for search_text in search_variants:
+                rects = page.search_for(search_text)
+                if rects:
+                    for rect in rects:
+                        fontsize, color, is_bold, origin_y = 11.0, (0, 0, 0), False, None
+                        for line_spans in lines:
+                            for span in line_spans:
+                                if search_text.lower() in span.get("text", "").lower():
+                                    fontsize = span["size"]
+                                    c = span.get("color", 0)
+                                    color = (
+                                        ((c >> 16) & 0xFF) / 255.0,
+                                        ((c >> 8) & 0xFF) / 255.0,
+                                        (c & 0xFF) / 255.0,
+                                    )
+                                    flags = span.get("flags", 0)
+                                    is_bold = bool(flags & (1 << 4))
+                                    origin_y = span.get("origin", (0, 0))[1]
+                                    break
+
+                        redaction_tasks.append({
+                            "rect": rect,
+                            "value": value,
+                            "fontsize": fontsize,
+                            "color": color,
+                            "is_bold": is_bold,
+                            "origin_y": origin_y,
+                        })
+                        found_on_page = True
+                    break  # Found with this variant
+
+            if found_on_page:
                 continue
 
-            # Strategy 2: Line-by-line scan with span concatenation
+            # Strategy 2: Line-by-line scan (case-insensitive)
             for line_spans in lines:
                 matches = find_placeholder_in_line(line_spans, placeholder)
-                for rect, fontsize, color, is_bold in matches:
+                for rect, fontsize, color, is_bold, origin_y in matches:
                     redaction_tasks.append({
                         "rect": rect,
                         "value": value,
                         "fontsize": fontsize,
                         "color": color,
                         "is_bold": is_bold,
+                        "origin_y": origin_y,
                     })
                     found_on_page = True
 
@@ -264,7 +271,7 @@ def replace_placeholders(input_path, output_path, replacements):
 
         page.apply_redactions()
 
-        # Step 2: Insert new text
+        # Step 2: Insert new text at EXACT original position
         for task in redaction_tasks:
             rect = task["rect"]
             chosen_font = (
@@ -273,16 +280,29 @@ def replace_placeholders(input_path, output_path, replacements):
                 else font_path
             )
 
-            baseline_y = rect.y1 - (rect.height * 0.15)
-
-            page.insert_text(
-                (rect.x0, baseline_y),
-                task["value"],
-                fontsize=task["fontsize"],
-                fontname="custom-font",
-                fontfile=chosen_font,
-                color=task["color"],
-            )
+            # Use origin_y from span data for pixel-perfect baseline alignment
+            # If origin_y is available, use it directly (this is the exact baseline)
+            # Otherwise fall back to textbox insertion which auto-aligns
+            if task["origin_y"]:
+                page.insert_text(
+                    (rect.x0, task["origin_y"]),
+                    task["value"],
+                    fontsize=task["fontsize"],
+                    fontname="custom-font",
+                    fontfile=chosen_font,
+                    color=task["color"],
+                )
+            else:
+                # Fallback: use insert_textbox for automatic vertical centering
+                page.insert_textbox(
+                    rect,
+                    task["value"],
+                    fontsize=task["fontsize"],
+                    fontname="custom-font",
+                    fontfile=chosen_font,
+                    color=task["color"],
+                    align=fitz.TEXT_ALIGN_LEFT,
+                )
             total_replaced += 1
 
     doc.save(output_path, garbage=4, deflate=True)
