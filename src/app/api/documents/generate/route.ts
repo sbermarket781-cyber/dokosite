@@ -59,6 +59,21 @@ export async function POST(req: NextRequest) {
       console.error("PDF generation stderr:", stderr);
     }
 
+    // Log the result for diagnostics
+    if (stdout) {
+      try {
+        const result = JSON.parse(stdout);
+        console.log("PDF generation result:", JSON.stringify(result, null, 2));
+        if (result.not_found?.length > 0) {
+          console.warn("Placeholders not found in PDF:", result.not_found);
+          console.warn("Placeholders present in PDF:", result.pdf_placeholders);
+          console.warn("Replacements requested:", Object.keys(replacements));
+        }
+      } catch {
+        console.log("PDF generation stdout:", stdout);
+      }
+    }
+
     // Read the generated PDF
     const pdfBuffer = await readFile(outputPath);
 

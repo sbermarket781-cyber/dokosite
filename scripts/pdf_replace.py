@@ -46,6 +46,91 @@ def find_font(candidates):
     return None
 
 
+def find_placeholder_rects(page, placeholder):
+    """
+    Find placeholder text in a PDF page. Uses multiple strategies:
+    1. Direct search_for() — works when text is in a single span
+    2. Span-level text scan — works when text is split across spans
+    3. Full page text scan — fallback for complex layouts
+    """
+    # Strategy 1: Direct search (fastest, works for simple cases)
+    rects = page.search_for(placeholder)
+    if rects:
+        return rects
+
+    # Strategy 2: Scan all text spans and find the placeholder
+    # This handles cases where {{Дата}} is split across spans
+    results = []
+    blocks = page.get_text("dict")["blocks"]
+
+    for block in blocks:
+        for line in block.get("lines", []):
+            spans = line.get("spans", [])
+            if not spans:
+                continue
+
+            # Concatenate all span texts in this line
+            line_text = ""
+            span_positions = []  # (start_idx, end_idx, span_rect)
+            for span in spans:
+                start = len(line_text)
+                line_text += span["text"]
+                end = len(line_text)
+                span_positions.append((start, end, fitz.Rect(span["bbox"])))
+
+            # Search for placeholder in the concatenated line
+            idx = line_text.find(placeholder)
+            while idx != -1:
+                end_idx = idx + len(placeholder)
+
+                # Find the bounding rect covering all spans that contain the placeholder
+                x0, y0, x1, y1 = None, None, None, None
+                for sp_start, sp_end, sp_rect in span_positions:
+                    # Check if this span overlaps with the placeholder range
+                    if sp_start < end_idx and sp_end > idx:
+                        if x0 is None:
+                            x0 = sp_rect.x0
+                            y0 = sp_rect.y0
+                            y1 = sp_rect.y1
+                        x1 = sp_rect.x1
+                        y0 = min(y0, sp_rect.y0)
+                        y1 = max(y1, sp_rect.y1)
+
+                if x0 is not None:
+                    results.append(fitz.Rect(x0, y0, x1, y1))
+
+                idx = line_text.find(placeholder, idx + 1)
+
+    return results
+
+
+def get_text_properties(page, rect, placeholder):
+    """Extract font size, color, and bold flag for text at given rect."""
+    fontsize = 11.0
+    color = (0, 0, 0)
+    is_bold = False
+
+    blocks = page.get_text("dict", clip=rect)["blocks"]
+    for block in blocks:
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                span_text = span.get("text", "")
+                # Match if span contains any part of the placeholder
+                if any(c in span_text for c in [placeholder, "{{", "}}"]):
+                    fontsize = span["size"]
+                    c = span.get("color", 0)
+                    color = (
+                        ((c >> 16) & 0xFF) / 255.0,
+                        ((c >> 8) & 0xFF) / 255.0,
+                        (c & 0xFF) / 255.0,
+                    )
+                    flags = span.get("flags", 0)
+                    is_bold = bool(flags & (1 << 4))
+                    return fontsize, color, is_bold
+
+    return fontsize, color, is_bold
+
+
 def replace_placeholders(input_path, output_path, replacements):
     """
     Open a PDF, find all {{...}} placeholders, remove them via redaction,
@@ -59,6 +144,15 @@ def replace_placeholders(input_path, output_path, replacements):
 
     doc = fitz.open(input_path)
     total_replaced = 0
+    not_found = []
+
+    # Also scan the PDF for any {{...}} patterns to help with diagnostics
+    all_pdf_placeholders = set()
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = page.get_text()
+        found = re.findall(r"\{\{[^}]+\}\}", text)
+        all_pdf_placeholders.update(found)
 
     for page_num in range(len(doc)):
         page = doc[page_num]
@@ -71,33 +165,24 @@ def replace_placeholders(input_path, output_path, replacements):
                 continue
 
             value = str(value)
-            rects = page.search_for(placeholder)
+            rects = find_placeholder_rects(page, placeholder)
+
+            if not rects and page_num == 0:
+                not_found.append(placeholder)
 
             for rect in rects:
-                # Extract original text properties (font size, color, flags)
-                fontsize = 11.0
-                color = (0, 0, 0)
-                is_bold = False
+                fontsize, color, is_bold = get_text_properties(
+                    page, rect, placeholder
+                )
 
-                blocks = page.get_text("dict", clip=rect)["blocks"]
-                for block in blocks:
-                    for line in block.get("lines", []):
-                        for span in line.get("spans", []):
-                            if placeholder in span.get("text", ""):
-                                fontsize = span["size"]
-                                # Color is stored as int, convert to RGB tuple
-                                c = span.get("color", 0)
-                                color = (
-                                    ((c >> 16) & 0xFF) / 255.0,
-                                    ((c >> 8) & 0xFF) / 255.0,
-                                    (c & 0xFF) / 255.0,
-                                )
-                                flags = span.get("flags", 0)
-                                is_bold = bool(flags & 2 ** 4)  # bit 4 = bold
-                                break
+                # Expand rect slightly to ensure full coverage of the text
+                expanded_rect = fitz.Rect(
+                    rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1
+                )
 
                 redaction_tasks.append({
-                    "rect": rect,
+                    "rect": expanded_rect,
+                    "original_rect": rect,
                     "placeholder": placeholder,
                     "value": value,
                     "fontsize": fontsize,
@@ -110,7 +195,6 @@ def replace_placeholders(input_path, output_path, replacements):
 
         # Step 1: Add redaction annotations to remove old text
         for task in redaction_tasks:
-            # Use white fill to cover the original text area
             page.add_redact_annot(task["rect"], text="", fill=(1, 1, 1))
 
         # Step 2: Apply all redactions (actually removes the text)
@@ -118,11 +202,14 @@ def replace_placeholders(input_path, output_path, replacements):
 
         # Step 3: Insert new text at original positions
         for task in redaction_tasks:
-            rect = task["rect"]
-            chosen_font = font_bold_path if task["is_bold"] and font_bold_path else font_path
+            rect = task["original_rect"]
+            chosen_font = (
+                font_bold_path
+                if task["is_bold"] and font_bold_path
+                else font_path
+            )
 
             # Calculate insertion point (baseline position)
-            # rect.y1 is the bottom, subtract a small offset for baseline
             baseline_y = rect.y1 - (rect.height * 0.15)
 
             page.insert_text(
@@ -138,7 +225,7 @@ def replace_placeholders(input_path, output_path, replacements):
     doc.save(output_path, garbage=4, deflate=True)
     doc.close()
 
-    return total_replaced
+    return total_replaced, not_found, list(all_pdf_placeholders)
 
 
 def main():
@@ -164,14 +251,17 @@ def main():
         sys.exit(1)
 
     try:
-        count = replace_placeholders(input_path, output_path, replacements)
-        # Output result as JSON for the Node.js caller
+        count, not_found, pdf_placeholders = replace_placeholders(
+            input_path, output_path, replacements
+        )
         result = {
             "success": True,
             "replacements_made": count,
             "output_path": output_path,
+            "not_found": not_found,
+            "pdf_placeholders": pdf_placeholders,
         }
-        print(json.dumps(result))
+        print(json.dumps(result, ensure_ascii=False))
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
