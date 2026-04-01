@@ -25,6 +25,10 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# Install Python 3 + PyMuPDF for PDF placeholder replacement + Cyrillic fonts
+RUN apk add --no-cache python3 py3-pip font-dejavu && \
+    pip3 install --no-cache-dir --break-system-packages PyMuPDF
+
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public
@@ -34,6 +38,9 @@ COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/prisma ./prisma
 # Copy all node_modules from deps (prisma CLI has many transitive deps)
 COPY --from=deps /app/node_modules ./node_modules
+
+# Copy PDF replacement script
+COPY scripts ./scripts
 
 # Create uploads directory
 RUN mkdir -p uploads/templates uploads/generated && chown -R nextjs:nodejs uploads
