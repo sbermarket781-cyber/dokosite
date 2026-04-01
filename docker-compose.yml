@@ -26,6 +26,16 @@ services:
     volumes:
       - uploads:/app/uploads
 
+  bot:
+    build: ./bot
+    restart: always
+    environment:
+      BOT_TOKEN: "7896459085:AAFgLzE67m799llUVAThCS6cqITwZOypO00"
+      WEBAPP_URL: "http://45.13.237.33:3000"
+      WEBAPP_INTERNAL_URL: "http://app:3000"
+    depends_on:
+      - app
+
 volumes:
   pgdata:
   uploads:
