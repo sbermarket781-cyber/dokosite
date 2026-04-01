@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   FileText,
   Receipt,
@@ -14,6 +14,8 @@ import {
   Search,
   FilePlus,
   TrendingUp,
+  Plus,
+  X,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -49,14 +51,22 @@ const iconColors = [
   "text-cyan-400",
 ];
 
+const availableIcons = Object.keys(iconMap);
+
 export default function DashboardPage() {
   const { data: session } = useSession();
   const router = useRouter();
   const [categories, setCategories] = useState<CategoryInfo[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newIcon, setNewIcon] = useState("FileText");
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
+  const isAdmin = session?.user?.role === "ADMIN";
+
+  const fetchCategories = () => {
     fetch("/api/categories")
       .then((res) => res.json())
       .then((data) => {
@@ -64,7 +74,36 @@ export default function DashboardPage() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchCategories();
   }, []);
+
+  const handleAddCategory = async () => {
+    if (!newName.trim()) return;
+    setSaving(true);
+    try {
+      const res = await fetch("/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName.trim(), icon: newIcon }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        alert(data.error || "Ошибка");
+        return;
+      }
+      setNewName("");
+      setNewIcon("FileText");
+      setShowAddModal(false);
+      fetchCategories();
+    } catch {
+      alert("Ошибка при создании категории");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const filteredCategories = categories.filter((cat) =>
     cat.name.toLowerCase().includes(search.toLowerCase())
@@ -91,7 +130,7 @@ export default function DashboardPage() {
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ delay: 0.1 }}
-        className="mb-6"
+        className="mb-6 flex gap-3 flex-wrap"
       >
         <Button
           size="lg"
@@ -101,6 +140,17 @@ export default function DashboardPage() {
           <FilePlus className="h-5 w-5" />
           Создать новый документ
         </Button>
+        {isAdmin && (
+          <Button
+            size="lg"
+            variant="outline"
+            className="w-full sm:w-auto"
+            onClick={() => setShowAddModal(true)}
+          >
+            <Plus className="h-5 w-5" />
+            Добавить категорию
+          </Button>
+        )}
       </motion.div>
 
       {/* Search */}
@@ -185,6 +235,98 @@ export default function DashboardPage() {
           )}
         </div>
       )}
+
+      {/* Add Category Modal */}
+      <AnimatePresence>
+        {showAddModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+            onClick={() => setShowAddModal(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 w-full max-w-md"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-5">
+                <h2 className="text-lg font-bold text-neutral-100">
+                  Новая категория
+                </h2>
+                <button
+                  onClick={() => setShowAddModal(false)}
+                  className="text-neutral-400 hover:text-neutral-200 transition-colors"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-neutral-400 mb-1.5">
+                    Название
+                  </label>
+                  <Input
+                    placeholder="Например: Договоры"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleAddCategory()}
+                    autoFocus
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm text-neutral-400 mb-1.5">
+                    Иконка
+                  </label>
+                  <div className="grid grid-cols-4 gap-2">
+                    {availableIcons.map((iconName, idx) => {
+                      const Icon = iconMap[iconName];
+                      return (
+                        <button
+                          key={iconName}
+                          onClick={() => setNewIcon(iconName)}
+                          className={`flex flex-col items-center gap-1 p-3 rounded-xl border transition-all ${
+                            newIcon === iconName
+                              ? "border-[#FF6200] bg-[#FF6200]/10 text-[#FF6200]"
+                              : "border-neutral-800 text-neutral-400 hover:border-neutral-700 hover:text-neutral-300"
+                          }`}
+                        >
+                          <Icon className="h-5 w-5" />
+                          <span className="text-[10px] truncate w-full text-center">
+                            {iconName}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-6">
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={() => setShowAddModal(false)}
+                >
+                  Отмена
+                </Button>
+                <Button
+                  className="flex-1"
+                  onClick={handleAddCategory}
+                  disabled={!newName.trim() || saving}
+                >
+                  {saving ? <Spinner className="h-4 w-4" /> : "Создать"}
+                </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
