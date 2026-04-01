@@ -18,6 +18,7 @@ import json
 import fitz  # PyMuPDF
 import os
 import re
+import unicodedata
 
 # Preferred fonts for Cyrillic support (in order of preference)
 # Includes paths for both Debian/Ubuntu and Alpine Linux
@@ -38,6 +39,10 @@ FONT_BOLD_CANDIDATES = [
     "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
 ]
 
+# Various bracket characters that PDF editors might use instead of { }
+OPEN_BRACKET_VARIANTS = ["{", "\u007B", "\uFF5B", "\uFE5B", "\u2774"]
+CLOSE_BRACKET_VARIANTS = ["}", "\u007D", "\uFF5D", "\uFE5D", "\u2775"]
+
 
 def find_font(candidates):
     for path in candidates:
@@ -46,89 +51,104 @@ def find_font(candidates):
     return None
 
 
-def find_placeholder_rects(page, placeholder):
-    """
-    Find placeholder text in a PDF page. Uses multiple strategies:
-    1. Direct search_for() — works when text is in a single span
-    2. Span-level text scan — works when text is split across spans
-    3. Full page text scan — fallback for complex layouts
-    """
-    # Strategy 1: Direct search (fastest, works for simple cases)
-    rects = page.search_for(placeholder)
-    if rects:
-        return rects
+def normalize_brackets(text):
+    """Normalize various bracket characters to standard ASCII { }"""
+    for ch in OPEN_BRACKET_VARIANTS:
+        text = text.replace(ch, "{")
+    for ch in CLOSE_BRACKET_VARIANTS:
+        text = text.replace(ch, "}")
+    return text
 
-    # Strategy 2: Scan all text spans and find the placeholder
-    # This handles cases where {{Дата}} is split across spans
-    results = []
+
+def get_all_spans(page):
+    """Extract all text spans from a page with their properties."""
+    spans = []
     blocks = page.get_text("dict")["blocks"]
-
     for block in blocks:
         for line in block.get("lines", []):
-            spans = line.get("spans", [])
-            if not spans:
-                continue
+            line_spans = line.get("spans", [])
+            for span in line_spans:
+                spans.append(span)
+    return spans
 
-            # Concatenate all span texts in this line
-            line_text = ""
-            span_positions = []  # (start_idx, end_idx, span_rect)
-            for span in spans:
-                start = len(line_text)
-                line_text += span["text"]
-                end = len(line_text)
-                span_positions.append((start, end, fitz.Rect(span["bbox"])))
 
-            # Search for placeholder in the concatenated line
-            idx = line_text.find(placeholder)
-            while idx != -1:
-                end_idx = idx + len(placeholder)
+def get_line_spans(page):
+    """Group spans by line, returning list of (line_spans, line_rect) tuples."""
+    lines = []
+    blocks = page.get_text("dict")["blocks"]
+    for block in blocks:
+        for line in block.get("lines", []):
+            line_spans = line.get("spans", [])
+            if line_spans:
+                lines.append(line_spans)
+    return lines
 
-                # Find the bounding rect covering all spans that contain the placeholder
-                x0, y0, x1, y1 = None, None, None, None
-                for sp_start, sp_end, sp_rect in span_positions:
-                    # Check if this span overlaps with the placeholder range
-                    if sp_start < end_idx and sp_end > idx:
-                        if x0 is None:
-                            x0 = sp_rect.x0
-                            y0 = sp_rect.y0
-                            y1 = sp_rect.y1
-                        x1 = sp_rect.x1
-                        y0 = min(y0, sp_rect.y0)
-                        y1 = max(y1, sp_rect.y1)
 
-                if x0 is not None:
-                    results.append(fitz.Rect(x0, y0, x1, y1))
+def find_placeholder_in_line(line_spans, placeholder):
+    """
+    Find a placeholder in concatenated line text.
+    Returns list of (rect, fontsize, color, is_bold) tuples.
+    Also handles normalized bracket matching.
+    """
+    results = []
 
-                idx = line_text.find(placeholder, idx + 1)
+    # Build line text and character-to-span mapping
+    line_text = ""
+    char_map = []  # index -> (span_index, span)
+    for si, span in enumerate(line_spans):
+        for ch in span["text"]:
+            char_map.append((si, span))
+            line_text += ch
+
+    # Try exact match first, then normalized match
+    search_texts = [
+        (line_text, placeholder),
+        (normalize_brackets(line_text), normalize_brackets(placeholder)),
+    ]
+
+    for text_to_search, pattern in search_texts:
+        idx = text_to_search.find(pattern)
+        while idx != -1:
+            end_idx = idx + len(pattern)
+
+            # Calculate bounding rect from the character map
+            involved_spans = set()
+            x0, y0, x1, y1 = None, None, None, None
+
+            for ci in range(idx, min(end_idx, len(char_map))):
+                si, span = char_map[ci]
+                if si not in involved_spans:
+                    involved_spans.add(si)
+                    bbox = span["bbox"]
+                    if x0 is None:
+                        x0, y0, x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
+                    else:
+                        x0 = min(x0, bbox[0])
+                        y0 = min(y0, bbox[1])
+                        x1 = max(x1, bbox[2])
+                        y1 = max(y1, bbox[3])
+
+            if x0 is not None:
+                # Get text properties from the first span containing the placeholder
+                first_span = char_map[idx][1]
+                fontsize = first_span.get("size", 11.0)
+                c = first_span.get("color", 0)
+                color = (
+                    ((c >> 16) & 0xFF) / 255.0,
+                    ((c >> 8) & 0xFF) / 255.0,
+                    (c & 0xFF) / 255.0,
+                )
+                flags = first_span.get("flags", 0)
+                is_bold = bool(flags & (1 << 4))
+
+                results.append((fitz.Rect(x0, y0, x1, y1), fontsize, color, is_bold))
+
+            idx = text_to_search.find(pattern, idx + 1)
+
+        if results:
+            break  # Found with this search method, no need to try normalized
 
     return results
-
-
-def get_text_properties(page, rect, placeholder):
-    """Extract font size, color, and bold flag for text at given rect."""
-    fontsize = 11.0
-    color = (0, 0, 0)
-    is_bold = False
-
-    blocks = page.get_text("dict", clip=rect)["blocks"]
-    for block in blocks:
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                span_text = span.get("text", "")
-                # Match if span contains any part of the placeholder
-                if any(c in span_text for c in [placeholder, "{{", "}}"]):
-                    fontsize = span["size"]
-                    c = span.get("color", 0)
-                    color = (
-                        ((c >> 16) & 0xFF) / 255.0,
-                        ((c >> 8) & 0xFF) / 255.0,
-                        (c & 0xFF) / 255.0,
-                    )
-                    flags = span.get("flags", 0)
-                    is_bold = bool(flags & (1 << 4))
-                    return fontsize, color, is_bold
-
-    return fontsize, color, is_bold
 
 
 def replace_placeholders(input_path, output_path, replacements):
@@ -145,19 +165,35 @@ def replace_placeholders(input_path, output_path, replacements):
     doc = fitz.open(input_path)
     total_replaced = 0
     not_found = []
+    debug_info = []
 
-    # Also scan the PDF for any {{...}} patterns to help with diagnostics
+    # Scan for all {{...}} patterns in the PDF for diagnostics
     all_pdf_placeholders = set()
     for page_num in range(len(doc)):
         page = doc[page_num]
         text = page.get_text()
-        found = re.findall(r"\{\{[^}]+\}\}", text)
+        normalized = normalize_brackets(text)
+        found = re.findall(r"\{\{[^}]+\}\}", normalized)
         all_pdf_placeholders.update(found)
+
+        # Also log all spans for debugging
+        for span_data in get_all_spans(page):
+            t = span_data.get("text", "").strip()
+            if t and ("{" in t or "}" in t or "{" in normalize_brackets(t)):
+                debug_info.append({
+                    "page": page_num + 1,
+                    "text": t,
+                    "chars": [f"U+{ord(c):04X}" for c in t],
+                    "font": span_data.get("font", ""),
+                })
 
     for page_num in range(len(doc)):
         page = doc[page_num]
 
-        # Collect all placeholder positions and their text properties
+        # Get all line spans for this page
+        lines = get_line_spans(page)
+
+        # Collect all redaction tasks
         redaction_tasks = []
 
         for placeholder, value in replacements.items():
@@ -165,51 +201,78 @@ def replace_placeholders(input_path, output_path, replacements):
                 continue
 
             value = str(value)
-            rects = find_placeholder_rects(page, placeholder)
+            found_on_page = False
 
-            if not rects and page_num == 0:
+            # Strategy 1: Direct search_for (fastest)
+            rects = page.search_for(placeholder)
+            if rects:
+                for rect in rects:
+                    fontsize, color, is_bold = 11.0, (0, 0, 0), False
+                    # Get properties from spans
+                    for line_spans in lines:
+                        for span in line_spans:
+                            if placeholder in span.get("text", ""):
+                                fontsize = span["size"]
+                                c = span.get("color", 0)
+                                color = (
+                                    ((c >> 16) & 0xFF) / 255.0,
+                                    ((c >> 8) & 0xFF) / 255.0,
+                                    (c & 0xFF) / 255.0,
+                                )
+                                flags = span.get("flags", 0)
+                                is_bold = bool(flags & (1 << 4))
+                                break
+
+                    redaction_tasks.append({
+                        "rect": rect,
+                        "value": value,
+                        "fontsize": fontsize,
+                        "color": color,
+                        "is_bold": is_bold,
+                    })
+                    found_on_page = True
+                continue
+
+            # Strategy 2: Line-by-line scan with span concatenation
+            for line_spans in lines:
+                matches = find_placeholder_in_line(line_spans, placeholder)
+                for rect, fontsize, color, is_bold in matches:
+                    redaction_tasks.append({
+                        "rect": rect,
+                        "value": value,
+                        "fontsize": fontsize,
+                        "color": color,
+                        "is_bold": is_bold,
+                    })
+                    found_on_page = True
+
+            if not found_on_page and page_num == 0:
                 not_found.append(placeholder)
-
-            for rect in rects:
-                fontsize, color, is_bold = get_text_properties(
-                    page, rect, placeholder
-                )
-
-                # Expand rect slightly to ensure full coverage of the text
-                expanded_rect = fitz.Rect(
-                    rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1
-                )
-
-                redaction_tasks.append({
-                    "rect": expanded_rect,
-                    "original_rect": rect,
-                    "placeholder": placeholder,
-                    "value": value,
-                    "fontsize": fontsize,
-                    "color": color,
-                    "is_bold": is_bold,
-                })
 
         if not redaction_tasks:
             continue
 
-        # Step 1: Add redaction annotations to remove old text
+        # Step 1: Redact old text
         for task in redaction_tasks:
-            page.add_redact_annot(task["rect"], text="", fill=(1, 1, 1))
+            expanded = fitz.Rect(
+                task["rect"].x0 - 1,
+                task["rect"].y0 - 1,
+                task["rect"].x1 + 1,
+                task["rect"].y1 + 1,
+            )
+            page.add_redact_annot(expanded, text="", fill=(1, 1, 1))
 
-        # Step 2: Apply all redactions (actually removes the text)
         page.apply_redactions()
 
-        # Step 3: Insert new text at original positions
+        # Step 2: Insert new text
         for task in redaction_tasks:
-            rect = task["original_rect"]
+            rect = task["rect"]
             chosen_font = (
                 font_bold_path
                 if task["is_bold"] and font_bold_path
                 else font_path
             )
 
-            # Calculate insertion point (baseline position)
             baseline_y = rect.y1 - (rect.height * 0.15)
 
             page.insert_text(
@@ -225,7 +288,7 @@ def replace_placeholders(input_path, output_path, replacements):
     doc.save(output_path, garbage=4, deflate=True)
     doc.close()
 
-    return total_replaced, not_found, list(all_pdf_placeholders)
+    return total_replaced, not_found, list(all_pdf_placeholders), debug_info
 
 
 def main():
@@ -251,7 +314,7 @@ def main():
         sys.exit(1)
 
     try:
-        count, not_found, pdf_placeholders = replace_placeholders(
+        count, not_found, pdf_placeholders, debug_info = replace_placeholders(
             input_path, output_path, replacements
         )
         result = {
@@ -260,6 +323,7 @@ def main():
             "output_path": output_path,
             "not_found": not_found,
             "pdf_placeholders": pdf_placeholders,
+            "debug_spans_with_brackets": debug_info,
         }
         print(json.dumps(result, ensure_ascii=False))
     except Exception as e:

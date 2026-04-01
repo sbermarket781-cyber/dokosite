@@ -39,6 +39,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    console.log("=== PDF GENERATE DEBUG ===");
+    console.log("Input filePath:", filePath);
+    console.log("Raw fieldValues:", JSON.stringify(fieldValues, null, 2));
+    console.log("Processed replacements:", JSON.stringify(replacements, null, 2));
+    console.log("========================");
+
     // Output path for the generated PDF
     const outputDir = path.join(process.cwd(), "uploads", "generated");
     const outputFileName = `${uuid()}.pdf`;
