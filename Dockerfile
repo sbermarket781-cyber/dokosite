@@ -7,8 +7,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
 COPY prisma.config.ts ./
-RUN npm ci
-RUN npx prisma generate
+RUN npm ci && npx prisma generate
 
 # Rebuild the source code only when needed
 FROM base AS builder
@@ -18,7 +17,7 @@ COPY . .
 
 # Build Next.js (increase memory limit to avoid OOM during standalone build)
 ENV NODE_OPTIONS="--max-old-space-size=4096"
-RUN npm run build
+RUN --mount=type=cache,target=/app/.next/cache npm run build
 
 # Production image
 FROM base AS runner
@@ -26,8 +25,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
