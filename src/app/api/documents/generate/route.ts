@@ -148,7 +148,7 @@ export async function POST(req: NextRequest) {
 
     const modifiedPdf = await replacePlaceholdersInPdf(pdfBuffer, replacements);
 
-    return new NextResponse(modifiedPdf, {
+    return new NextResponse(new Uint8Array(modifiedPdf), {
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": "attachment; filename=document.pdf",
